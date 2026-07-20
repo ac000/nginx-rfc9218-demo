@@ -1,0 +1,47 @@
+# RFC9218 Priority Demo
+
+# Generate test data file (256KB)
+# dd if=/dev/urandom of=/path/to/demo/data.bin bs=1024 count=256
+
+daemon off;
+events {}
+
+http {
+    access_log /dev/stdout;
+    error_log /dev/stderr;
+
+    # Enable HTTP/2
+    http2 on;
+
+    server {
+        listen 8443 ssl;
+        listen [::1]:8443 ssl;
+        server_name localhost;
+
+        ssl_certificate     /path/to/cert.pem;
+        ssl_certificate_key /path/to/key.pem;
+
+        root /path/to/nginx-rfc9218-demo/;
+
+        # Demo page
+        location / {
+            index index.html;
+        }
+
+        # Priority endpoints - urgency extracted from URL
+        # /priority/1/data.bin -> Priority: u=1
+        # /priority/3/data.bin -> Priority: u=3
+        # /priority/6/data.bin -> Priority: u=6
+
+        location ~ ^/priority/([0-7])/data\.bin$ {
+            # Add server-side Priority header (RFC9218 Section 8)
+            add_header Priority "u=$1";
+
+            # Serve the test data file directly
+            rewrite ^ /data.bin break;
+
+            # Disable caching for demo
+            add_header Cache-Control "no-store";
+        }
+    }
+}
