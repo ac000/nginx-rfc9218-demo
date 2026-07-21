@@ -4,6 +4,29 @@ RFC9218 HTTP/2 Priority Demo
 
 This demo visualizes RFC9218 Extensible Prioritization in action.
 
+Prerequisites
+=============
+
+This demo requires nginx with RFC9218 support. As of writing, this is not
+yet in mainline nginx. You'll need to apply the RFC9218 patchset.
+
+**Get the patches from the pull request:**
+
+https://github.com/nginx/nginx/pull/1520
+
+**Apply with curl + git-am:**::
+
+    cd /path/to/nginx
+    curl -L https://github.com/nginx/nginx/pull/1520.patch | git am
+
+**Or use the GitHub CLI:**::
+
+    cd /path/to/nginx
+    gh pr checkout 1520
+
+Build nginx with the patches applied, then use this demo to verify the
+implementation works correctly.
+
 Two Test Modes
 ==============
 
