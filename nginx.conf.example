@@ -10,8 +10,12 @@ http {
     access_log /dev/stdout;
     error_log /dev/stderr;
 
-    # Enable HTTP/2
     http2 on;
+    http3 on;
+
+    # Two origins so browser tests can force one protocol or the other:
+    #   :8443   HTTP/2 only          (no QUIC listen, no Alt-Svc)
+    #   :8444   HTTP/3 preferred     (QUIC listen + Alt-Svc: h3=":8444")
 
     server {
         listen 8443 ssl;
@@ -23,24 +27,38 @@ http {
 
         root /path/to/nginx-rfc9218-demo/;
 
-        # Demo page
         location / {
             index index.html;
         }
 
-        # Priority endpoints - urgency extracted from URL
-        # /priority/1/data.bin -> Priority: u=1
-        # /priority/3/data.bin -> Priority: u=3
-        # /priority/6/data.bin -> Priority: u=6
+        location ~ ^/priority/([0-7])/data\.bin$ {
+            add_header Priority "u=$1";
+            rewrite ^ /data.bin break;
+            add_header Cache-Control "no-store";
+        }
+    }
+
+    server {
+        listen 8444 ssl;
+        listen [::1]:8444 ssl;
+        listen 8444 quic reuseport;
+        listen [::1]:8444 quic reuseport;
+        server_name localhost;
+
+        ssl_certificate     /path/to/cert.pem;
+        ssl_certificate_key /path/to/key.pem;
+
+        add_header Alt-Svc 'h3=":8444"; ma=86400';
+
+        root /path/to/nginx-rfc9218-demo/;
+
+        location / {
+            index index.html;
+        }
 
         location ~ ^/priority/([0-7])/data\.bin$ {
-            # Add server-side Priority header (RFC9218 Section 8)
             add_header Priority "u=$1";
-
-            # Serve the test data file directly
             rewrite ^ /data.bin break;
-
-            # Disable caching for demo
             add_header Cache-Control "no-store";
         }
     }

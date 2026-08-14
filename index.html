@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>RFC9218 HTTP/2 Priority Demo</title>
+    <title>RFC9218 HTTP/2 &amp; HTTP/3 Priority Demo</title>
     <style>
         * {
             box-sizing: border-box;
@@ -95,6 +95,15 @@
             background: #f8d7da;
             color: #721c24;
         }
+        .resource-proto {
+            width: 60px;
+            text-align: center;
+            font-family: monospace;
+            font-size: 12px;
+            color: #999;
+            font-weight: bold;
+            margin-left: 8px;
+        }
         .progress-container {
             flex: 1;
             margin: 0 15px;
@@ -163,7 +172,25 @@
     </style>
 </head>
 <body>
-    <h1>RFC9218 HTTP/2 Priority Demo</h1>
+    <h1>RFC9218 HTTP/2 &amp; HTTP/3 Priority Demo</h1>
+
+    <div id="origin-banner" style="background:#fff;padding:12px 15px;border-radius:8px;margin-bottom:20px;box-shadow:0 2px 4px rgba(0,0,0,0.1);border-left:4px solid #009639;">
+        <div style="font-size:14px;">
+            <strong>Browser demo origin:</strong>
+            <span id="origin-label" style="font-family:monospace;"></span>
+            &nbsp;&mdash;&nbsp;
+            <span id="origin-mode"></span>
+        </div>
+        <div style="font-size:13px;color:#666;margin-top:6px;">
+            Switch origin to force a protocol for the browser demo:
+            <a id="switch-h2" href="#" style="margin-left:8px;">HTTP/2 only (:8443)</a>
+            &nbsp;|&nbsp;
+            <a id="switch-h3" href="#">HTTP/3 preferred (:8444)</a>
+        </div>
+        <div id="protocol-observed" style="font-size:12px;color:#888;margin-top:6px;">
+            Per-request protocol will appear here after the browser demo runs.
+        </div>
+    </div>
 
     <div class="description">
         <p>This demo shows <strong>RFC9218 Extensible Prioritization</strong> in action.
@@ -194,14 +221,15 @@
 
     <div class="controls">
         <button id="startBtn" onclick="startDemo()">Start Browser Demo</button>
-        <button id="ngttpBtn" onclick="runNghttpTest()">Run nghttp Test</button>
+        <button id="ngttpBtn" onclick="runNghttpTest()">Run nghttp Test (HTTP/2)</button>
+        <button id="j3sterBtn" onclick="runJ3sterTest()">Run j3ster Test (HTTP/3)</button>
         <button id="resetBtn" class="reset-btn" onclick="resetDemo()" disabled>Reset</button>
         <span id="status" style="margin-left: 15px; color: #666;"></span>
     </div>
 
     <div id="nghttp-results" style="display: none; margin-bottom: 20px;">
         <div class="results">
-            <h3>nghttp Test Results (true RFC9218 test)</h3>
+            <h3 id="cli-results-title">CLI Test Results (true RFC9218 test)</h3>
             <pre id="nghttp-output" style="background: #1e1e1e; color: #d4d4d4; padding: 15px; border-radius: 4px; overflow-x: auto; font-size: 12px; line-height: 1.4;"></pre>
         </div>
     </div>
@@ -215,6 +243,7 @@
             <div class="progress-container">
                 <div class="progress-bar" id="progress-low1">0%</div>
             </div>
+            <span class="resource-proto" id="proto-low1">-</span>
             <span class="completion-order pending" id="order-low1">-</span>
         </div>
 
@@ -224,6 +253,7 @@
             <div class="progress-container">
                 <div class="progress-bar" id="progress-high1">0%</div>
             </div>
+            <span class="resource-proto" id="proto-high1">-</span>
             <span class="completion-order pending" id="order-high1">-</span>
         </div>
 
@@ -233,6 +263,7 @@
             <div class="progress-container">
                 <div class="progress-bar" id="progress-medium1">0%</div>
             </div>
+            <span class="resource-proto" id="proto-medium1">-</span>
             <span class="completion-order pending" id="order-medium1">-</span>
         </div>
 
@@ -242,6 +273,7 @@
             <div class="progress-container">
                 <div class="progress-bar" id="progress-low2">0%</div>
             </div>
+            <span class="resource-proto" id="proto-low2">-</span>
             <span class="completion-order pending" id="order-low2">-</span>
         </div>
 
@@ -251,6 +283,7 @@
             <div class="progress-container">
                 <div class="progress-bar" id="progress-high2">0%</div>
             </div>
+            <span class="resource-proto" id="proto-high2">-</span>
             <span class="completion-order pending" id="order-high2">-</span>
         </div>
 
@@ -260,6 +293,7 @@
             <div class="progress-container">
                 <div class="progress-bar" id="progress-medium2">0%</div>
             </div>
+            <span class="resource-proto" id="proto-medium2">-</span>
             <span class="completion-order pending" id="order-medium2">-</span>
         </div>
 
@@ -272,6 +306,34 @@
     <script>
         let completionOrder = 0;
         let startTime = 0;
+        let observedProtocols = [];
+
+        // Reliable Resource Timing capture via PerformanceObserver.
+        // getEntriesByName() has a small race window right after fetch
+        // completes; PerformanceObserver fires reliably when the entry is
+        // added to the buffer.
+        const perfEntries = new Map();  // url -> PerformanceResourceTiming
+        try {
+            const obs = new PerformanceObserver((list) => {
+                for (const e of list.getEntries()) {
+                    perfEntries.set(e.name, e);
+                }
+            });
+            obs.observe({ type: 'resource', buffered: true });
+        } catch (e) {
+            console.warn('PerformanceObserver unavailable:', e);
+        }
+
+        async function waitForPerfEntry(url, timeoutMs = 250) {
+            const deadline = performance.now() + timeoutMs;
+            while (performance.now() < deadline) {
+                if (perfEntries.has(url)) return perfEntries.get(url);
+                await new Promise(r => setTimeout(r, 10));
+            }
+            // Last-ditch synchronous lookup
+            const es = performance.getEntriesByName(url);
+            return es.length ? es[es.length - 1] : null;
+        }
 
         const resources = [
             { id: 'low1', url: '/priority/6/data.bin', priority: 'low' },
@@ -290,8 +352,11 @@
             const fetchPriority = resource.priority === 'high' ? 'high' :
                                   resource.priority === 'low' ? 'low' : 'auto';
 
+            const url = new URL(resource.url + '?_=' + Date.now() + Math.random(),
+                                window.location.href).href;
+
             try {
-                const response = await fetch(resource.url + '?_=' + Date.now() + Math.random(), {
+                const response = await fetch(url, {
                     cache: 'no-store',
                     priority: fetchPriority
                 });
@@ -318,20 +383,42 @@
                 progressBar.style.width = '100%';
                 progressBar.textContent = '100%';
 
+                // Look up the negotiated protocol from Resource Timing
+                const entry = await waitForPerfEntry(url);
+                let proto;
+                if (!entry) {
+                    proto = 'no-entry';
+                } else if (!entry.nextHopProtocol) {
+                    proto = 'empty';
+                } else {
+                    proto = entry.nextHopProtocol;
+                }
+                observedProtocols.push(proto);
+
                 // Mark completion
                 completionOrder++;
                 const elapsed = ((performance.now() - startTime) / 1000).toFixed(2);
                 orderSpan.textContent = '#' + completionOrder;
                 orderSpan.classList.remove('pending');
 
+                // Show the protocol badge on the resource row
+                const protoBadge = document.getElementById(`proto-${resource.id}`);
+                if (protoBadge) {
+                    protoBadge.textContent = proto;
+                    protoBadge.style.color =
+                        proto === 'h3' ? '#0066cc' :
+                        proto === 'h2' ? '#009639' :
+                        proto === 'http/1.1' ? '#888' : '#c33';
+                }
+
                 // Add to timeline
                 const timeline = document.getElementById('timeline-entries');
-                const entry = document.createElement('div');
-                entry.className = 'timeline-entry';
+                const tlEntry = document.createElement('div');
+                tlEntry.className = 'timeline-entry';
                 const priorityLabel = resource.priority === 'high' ? 'u=1' :
                                      resource.priority === 'medium' ? 'u=3' : 'u=6';
-                entry.textContent = `#${completionOrder} @ ${elapsed}s - ${resource.id} (${priorityLabel})`;
-                timeline.appendChild(entry);
+                tlEntry.textContent = `#${completionOrder} @ ${elapsed}s - ${resource.id} (${priorityLabel}) [${proto}]`;
+                timeline.appendChild(tlEntry);
 
             } catch (e) {
                 console.error('Fetch error for', resource.id, e);
@@ -340,47 +427,46 @@
             }
         }
 
-        async function runNghttpTest() {
-            const btn = document.getElementById('ngttpBtn');
+        async function runCliTest(opts) {
+            // opts: { endpoint, btnId, toolLabel, protoLabel, waitLabel, resetLabel }
+            const btn = document.getElementById(opts.btnId);
+            const otherBtnId = opts.btnId === 'ngttpBtn' ? 'j3sterBtn' : 'ngttpBtn';
+            const otherBtn = document.getElementById(otherBtnId);
             const output = document.getElementById('nghttp-output');
             const results = document.getElementById('nghttp-results');
+            const title = document.getElementById('cli-results-title');
 
             btn.disabled = true;
+            otherBtn.disabled = true;
             document.getElementById('startBtn').disabled = true;
-            btn.textContent = 'Running nghttp test (~60s)...';
-            output.innerHTML = '<div style="color: #888;">Running nghttp with RFC9218 priorities...<br><br>This sends 6 requests with different priorities (u=1, u=3, u=6) on a single HTTP/2 connection.<br>Please wait...</div>';
+            btn.textContent = opts.waitLabel;
+            title.textContent = `${opts.toolLabel} Test Results (${opts.protoLabel})`;
+            output.innerHTML = `<div style="color: #888;">Running ${opts.toolLabel} with RFC9218 priorities over ${opts.protoLabel}...<br><br>This sends 6 concurrent requests with different priorities (u=1, u=3, u=6).<br>Please wait...</div>`;
 
             // Reset progress bars (this hides nghttp-results)
             resetDemo();
 
-            // Show nghttp results panel and timeline
+            // Show results panel and timeline
             results.style.display = 'block';
             document.getElementById('timeline').style.display = 'block';
             document.getElementById('timeline-entries').innerHTML = '';
 
             try {
-                const response = await fetch('http://localhost:8081/run-test');
+                const response = await fetch(opts.endpoint);
                 const data = await response.json();
 
                 if (data.success && data.results && data.results.length > 0) {
-                    // Update progress bars based on results
-                    const maxTime = Math.max(...data.results.map(r => r.time));
-
                     // Animate progress bars in completion order
                     for (const r of data.results) {
                         const progressBar = document.getElementById(`progress-${r.id}`);
                         const orderSpan = document.getElementById(`order-${r.id}`);
 
                         if (progressBar && orderSpan) {
-                            // Set progress bar to 100%
                             progressBar.style.width = '100%';
                             progressBar.textContent = r.time.toFixed(2) + 's';
-
-                            // Set completion order
                             orderSpan.textContent = '#' + r.order;
                             orderSpan.classList.remove('pending');
 
-                            // Add to timeline
                             const timeline = document.getElementById('timeline-entries');
                             const entry = document.createElement('div');
                             entry.className = 'timeline-entry';
@@ -388,12 +474,10 @@
                             timeline.appendChild(entry);
                         }
 
-                        // Small delay between updates for visual effect
                         await new Promise(resolve => setTimeout(resolve, 100));
                     }
 
-                    // Build nice HTML output
-                    let html = '<div style="margin-bottom: 15px; font-weight: bold; color: #4ec9b0;">nghttp RFC9218 Priority Test Results</div>';
+                    let html = `<div style="margin-bottom: 15px; font-weight: bold; color: #4ec9b0;">${opts.toolLabel} RFC9218 Priority Test Results (${opts.protoLabel})</div>`;
                     html += '<div style="margin-bottom: 15px;">Completion Timeline:</div>';
 
                     data.results.forEach(r => {
@@ -408,7 +492,6 @@
                         html += `</div>`;
                     });
 
-                    // Add summary
                     const highTimes = data.results.filter(r => r.priority === 'high').map(r => r.time);
                     const lowTimes = data.results.filter(r => r.priority === 'low').map(r => r.time);
                     const highAvg = highTimes.reduce((a,b) => a+b, 0) / highTimes.length;
@@ -421,20 +504,43 @@
                     html += '</div>';
 
                     output.innerHTML = html;
-                    document.getElementById('status').textContent = 'nghttp test complete!';
+                    document.getElementById('status').textContent = `${opts.toolLabel} test complete!`;
                 } else if (data.success) {
                     output.textContent = data.raw_output || 'No output';
                 } else {
-                    output.textContent = 'Error: ' + data.error;
+                    output.textContent = 'Error: ' + (data.raw_output || data.error || 'unknown');
                 }
             } catch (e) {
-                output.innerHTML = '<span style="color: #f48771;">Error connecting to test server.</span><br><br>Make sure test-server.py is running:<br>  <span style="color: #9cdcfe;">python3 test-server.py</span>';
+                output.innerHTML = '<span style="color: #f48771;">Error connecting to test server.</span><br><br>Make sure test-server.pl is running:<br>  <span style="color: #9cdcfe;">perl test-server.pl</span>';
             }
 
             btn.disabled = false;
+            otherBtn.disabled = false;
             document.getElementById('startBtn').disabled = false;
             document.getElementById('resetBtn').disabled = false;
-            btn.textContent = 'Run nghttp Test';
+            btn.textContent = opts.resetLabel;
+        }
+
+        function runNghttpTest() {
+            return runCliTest({
+                endpoint:   'http://localhost:8081/run-test',
+                btnId:      'ngttpBtn',
+                toolLabel:  'nghttp',
+                protoLabel: 'HTTP/2',
+                waitLabel:  'Running nghttp test (~60s)...',
+                resetLabel: 'Run nghttp Test (HTTP/2)',
+            });
+        }
+
+        function runJ3sterTest() {
+            return runCliTest({
+                endpoint:   'http://localhost:8081/run-test-h3',
+                btnId:      'j3sterBtn',
+                toolLabel:  'j3ster',
+                protoLabel: 'HTTP/3',
+                waitLabel:  'Running j3ster test (~60s)...',
+                resetLabel: 'Run j3ster Test (HTTP/3)',
+            });
         }
 
         async function startDemo() {
@@ -446,12 +552,43 @@
             document.getElementById('timeline-entries').innerHTML = '';
 
             completionOrder = 0;
+            observedProtocols = [];
             startTime = performance.now();
+
+            // Clear old resource timing entries so nextHopProtocol lookups
+            // reliably target this run's requests
+            if (performance.clearResourceTimings) {
+                performance.clearResourceTimings();
+            }
 
             // Start all requests simultaneously
             const promises = resources.map(r => fetchResource(r));
 
             await Promise.all(promises);
+
+            // Summarise observed protocols (per-request) in the origin banner
+            const counts = {};
+            for (const p of observedProtocols) counts[p] = (counts[p] || 0) + 1;
+            const summary = Object.entries(counts)
+                .map(([k, v]) => `${v}\u00d7${k}`)
+                .join(', ');
+
+            const port = window.location.port;
+            const usedH3 = observedProtocols.some(p => p === 'h3');
+            let hint = '';
+            if (port === '8444' && !usedH3) {
+                hint = '<div style="color:#c33;margin-top:4px;">'
+                     + '&#9888; No HTTP/3 negotiated. Chrome refuses QUIC to self-signed origins '
+                     + '(<code>--ignore-certificate-errors</code> alone is not sufficient and now '
+                     + 'shows an &quot;unsupported flag&quot; warning). Use the bundled helper '
+                     + '<code style="background:#f3f3f3;padding:1px 4px;">./chrome-quic-launch.sh</code>, '
+                     + 'which pins the demo cert&apos;s SPKI hash so QUIC is accepted.'
+                     + '</div>';
+            }
+            document.getElementById('protocol-observed').innerHTML =
+                observedProtocols.length
+                    ? `Last run protocol(s): <strong>${summary}</strong>${hint}`
+                    : 'Per-request protocol will appear here after the browser demo runs.';
 
             document.getElementById('status').textContent = 'Complete! Check completion order below.';
             document.getElementById('resetBtn').disabled = false;
@@ -462,11 +599,16 @@
             resources.forEach(r => {
                 const progressBar = document.getElementById(`progress-${r.id}`);
                 const orderSpan = document.getElementById(`order-${r.id}`);
+                const protoBadge = document.getElementById(`proto-${r.id}`);
                 progressBar.style.width = '0%';
                 progressBar.style.background = '#009639';
                 progressBar.textContent = '0%';
                 orderSpan.textContent = '-';
                 orderSpan.classList.add('pending');
+                if (protoBadge) {
+                    protoBadge.textContent = '-';
+                    protoBadge.style.color = '#999';
+                }
             });
 
             document.getElementById('timeline').style.display = 'none';
@@ -476,6 +618,33 @@
             document.getElementById('resetBtn').disabled = true;
             completionOrder = 0;
         }
+        function initOriginBanner() {
+            const H2_ORIGIN = window.location.protocol + '//' + window.location.hostname + ':8443';
+            const H3_ORIGIN = window.location.protocol + '//' + window.location.hostname + ':8444';
+            const port = window.location.port || (window.location.protocol === 'https:' ? '443' : '80');
+
+            let mode;
+            if (port === '8443') {
+                mode = '<strong style="color:#009639;">HTTP/2 only</strong> (no QUIC listen, no Alt-Svc)';
+            } else if (port === '8444') {
+                mode = '<strong style="color:#0066cc;">HTTP/3 preferred</strong> (Alt-Svc: h3=":8444"). '
+                     + 'Chrome refuses QUIC to origins with untrusted certificates. Launch a throw-away Chromium '
+                     + 'profile via the bundled helper: '
+                     + '<code style="background:#f3f3f3;padding:1px 4px;font-size:11px;">./chrome-quic-launch.sh</code>.';
+            } else {
+                mode = '<em>unknown mode &mdash; expected :8443 or :8444</em>';
+            }
+
+            document.getElementById('origin-label').textContent = window.location.origin;
+            document.getElementById('origin-mode').innerHTML = mode;
+
+            const h2Link = document.getElementById('switch-h2');
+            const h3Link = document.getElementById('switch-h3');
+            h2Link.href = H2_ORIGIN + window.location.pathname + window.location.search + window.location.hash;
+            h3Link.href = H3_ORIGIN + window.location.pathname + window.location.search + window.location.hash;
+        }
+
+        initOriginBanner();
     </script>
 </body>
 </html>
