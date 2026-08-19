@@ -13,7 +13,7 @@ yet in mainline nginx. You'll need to apply the RFC9218 patchset.
 
 **Get the patches from the pull request:**
 
-<https://github.com/nginx/nginx/pull/1657> HTTP/3 + HTTP/3 or
+<https://github.com/nginx/nginx/pull/1657> HTTP/3 + HTTP/2 or
 <https://github.com/nginx/nginx/pull/1520> HTTP/2
 
 **Apply with curl + git-am:**::
